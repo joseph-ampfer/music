@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Face-Textured Audio-Reactive Blob</title>
+  <style>
+    body { margin:0; overflow:hidden; background:#000; }
+    canvas{display:block;}
+  </style>
+</head>
+<body>
+  <!-- Three.js + Utils -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/BufferGeometryUtils.js"></script>
+
+  <script>
+    let scene, camera, renderer;
+    let sphere, analyser, dataArray;
+    let bars, barCount = 64;      // ← we'll use these for the ring
+    let video, videoTexture;
+
+    init();
+    animate();
+
+    function init() {
+      // 1) SCENE / CAMERA / RENDERER
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 1000);
+      camera.position.z = 5;
+      renderer = new THREE.WebGLRenderer({antialias:true});
+      renderer.setSize(innerWidth, innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      // 2) LIGHT
+      const light = new THREE.PointLight(0xffffff, 1);
+      light.position.set(5,5,5);
+      scene.add(light);
+
+      // 3) VIDEO SETUP
+      video = document.createElement('video');
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      navigator.mediaDevices.getUserMedia({video:true})
+        .then(stream => {
+          video.srcObject = stream;
+          video.play();
+          // once video is ready, make the texture:
+          videoTexture = new THREE.VideoTexture(video);
+          videoTexture.minFilter = THREE.LinearFilter;
+          videoTexture.magFilter = THREE.LinearFilter;
+          videoTexture.format    = THREE.RGBAFormat;
+        })
+        .catch(err => console.warn('No camera:', err));
+
+      // 4) SPHERE + MATERIAL
+      let geometry = new THREE.SphereBufferGeometry(1, 128, 128);
+      geometry = THREE.BufferGeometryUtils.mergeVertices(geometry);
+      const pos = geometry.attributes.position;
+      geometry.setAttribute('origPos', new THREE.BufferAttribute(pos.array.slice(), 3));
+
+      const material = new THREE.MeshStandardMaterial({
+        metalness: 0.5,
+        roughness: 0.2,
+        flatShading: false,
+        // placeholder until videoTexture is ready
+        map: videoTexture || null,
+        emissiveMap: videoTexture || null,
+        emissive: 0x222222
+      });
+
+      sphere = new THREE.Mesh(geometry, material);
+      scene.add(sphere);
+
+      // 5) AUDIO SETUP
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+          const ctx = new (window.AudioContext||window.webkitAudioContext)();
+          const src = ctx.createMediaStreamSource(stream);
+          analyser = ctx.createAnalyser();
+          analyser.fftSize = 256;
+          src.connect(analyser);
+          dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+
+          // ── INSERT RING-OF-BARS SETUP HERE ──
+          // create 64 bars in a circle
+          const barGeo = new THREE.BoxBufferGeometry(0.1, 1, 0.1);
+          const barMat = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            emissive: 0x222222,
+            roughness: 0.3
+          });
+          bars = new THREE.InstancedMesh(barGeo, barMat, barCount);
+          scene.add(bars);
+
+          // position them in a ring of radius 3
+          const dummy = new THREE.Object3D();
+          for (let i = 0; i < barCount; i++) {
+            const angle = (i / barCount) * Math.PI * 2;
+            dummy.position.set(
+              Math.cos(angle) * 3,
+              0,
+              Math.sin(angle) * 3
+            );
+            dummy.rotation.y = -angle;
+            dummy.updateMatrix();
+            bars.setMatrixAt(i, dummy.matrix);
+          }
+          bars.instanceMatrix.needsUpdate = true;
+          // ── end ring-of-bars setup ──
+          
+        })
+        .catch(console.error);
+
+      window.addEventListener('resize', onResize);
+    }
+
+    function onResize() {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      // once the videoTexture exists, ensure material knows to update each frame:
+      if (videoTexture) {
+        sphere.material.map = videoTexture;
+        sphere.material.emissiveMap = videoTexture;
+        sphere.material.needsUpdate = true;
+      }
+
+      if (analyser) {
+        analyser.getByteFrequencyData(dataArray);
+        deformMesh(dataArray);
+        colorPulse(dataArray);
+        // ── CALL updateBars() HERE ──
+        updateBars();
+        // ── end ring-of-bars update ─
+      }
+
+      sphere.rotation.y += 0.5 * 0.01;
+      renderer.render(scene, camera);
+    }
+
+    // ... (deformMesh & colorPulse same as before) ...
+    function deformMesh(freqData) {
+      const geom = sphere.geometry;
+      const pos = geom.attributes.position;
+      const orig = geom.attributes.origPos;
+      // Compute high-frequency average for spikes
+      const hfBins = freqData.slice(freqData.length * 0.7);
+      const highAvg = hfBins.reduce((sum, v) => sum + v, 0) / hfBins.length / 255;
+
+      for (let i = 0; i < pos.count; i++) {
+        const ox = orig.getX(i), oy = orig.getY(i), oz = orig.getZ(i);
+        const dir = new THREE.Vector3(ox, oy, oz).normalize();
+        const bin = Math.floor((i / pos.count) * freqData.length);
+        const amp = freqData[bin] / 255;
+        let displacement = 1 + amp * 0.5;
+        // Add spikes for high freqs
+        displacement += Math.pow(highAvg, 2) * 2;
+        pos.setXYZ(i, dir.x * displacement, dir.y * displacement, dir.z * displacement);
+      }
+      pos.needsUpdate = true;
+      geom.computeVertexNormals();
+    }
+
+    function colorPulse(freqData) {
+      // use low-mid frequencies for color
+      const midBins = freqData.slice(freqData.length * 0.3, freqData.length * 0.6);
+      const avg = midBins.reduce((sum, v) => sum + v, 0) / midBins.length / 255;
+      // cycle hue over time
+      const hue = (performance.now() * 0.0001 + avg * 0.5) % 1;
+      sphere.material.color.setHSL(hue, 1, 0.5);
+      sphere.material.emissive.setHSL(hue, 1, avg * 0.5);
+      sphere.material.needsUpdate = true;
+    }
+
+     // ── NEW FUNCTION: updateBars ──
+    function updateBars() {
+      const dummy = new THREE.Object3D();
+      for (let i = 0; i < barCount; i++) {
+        // pick matching freq bin
+        const v = dataArray[Math.floor((i/barCount) * dataArray.length)] / 255;
+        const height = THREE.MathUtils.lerp(0.2, 5, v);
+
+        // recompute position & scale
+        const angle = (i / barCount) * Math.PI * 2;
+        dummy.position.set(
+          Math.cos(angle) * 3,
+          height / 2,
+          Math.sin(angle) * 3
+        );
+        dummy.scale.set(1, height, 1);
+        dummy.rotation.y = -angle;
+        dummy.updateMatrix();
+        bars.setMatrixAt(i, dummy.matrix);
+      }
+      bars.instanceMatrix.needsUpdate = true;
+    }
+  </script>
+</body>
+</html>

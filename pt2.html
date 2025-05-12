@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Trippy Audio-Reactive Blob</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!-- Three.js from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- BufferGeometryUtils to merge vertices and smooth the seam -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/utils/BufferGeometryUtils.js"></script>
+  <script>
+    let scene, camera, renderer;
+    let sphere, analyser, dataArray;
+
+    init();
+    animate();
+
+    function init() {
+      // Scene & Camera
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 0, 5);
+
+      // Renderer
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      // Light
+      const light = new THREE.PointLight(0xffffff, 1);
+      light.position.set(5, 5, 5);
+      scene.add(light);
+
+      // Sphere Geometry
+      let geometry = new THREE.SphereBufferGeometry(1, 128, 128);
+      // Merge vertices across the seam to smooth shading
+      geometry = THREE.BufferGeometryUtils.mergeVertices(geometry);
+
+      // Store original positions for deformation reference
+      const posAttr = geometry.attributes.position;
+      const originalPositions = new Float32Array(posAttr.array);
+      geometry.setAttribute('origPos', new THREE.BufferAttribute(originalPositions, 3));
+
+      // Material with trippy emissive & metalness
+      const material = new THREE.MeshStandardMaterial({
+        metalness: 0.5,
+        roughness: 0.2,
+        emissive: 0x000000,
+        flatShading: false
+      });
+
+      sphere = new THREE.Mesh(geometry, material);
+      scene.add(sphere);
+
+      // Audio Setup
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const source = audioCtx.createMediaStreamSource(stream);
+          analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          source.connect(analyser);
+          dataArray = new Uint8Array(analyser.frequencyBinCount);
+        })
+        .catch(err => console.error('Mic error:', err));
+
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (analyser) {
+        analyser.getByteFrequencyData(dataArray);
+        deformMesh(dataArray);
+        colorPulse(dataArray);
+      }
+      sphere.rotation.y += 0.002;
+      renderer.render(scene, camera);
+    }
+
+    function deformMesh(freqData) {
+      const geom = sphere.geometry;
+      const pos = geom.attributes.position;
+      const orig = geom.attributes.origPos;
+      const hfStart = Math.floor(freqData.length * 0.7);
+      const hfBins = freqData.slice(hfStart);
+      const highAvg = hfBins.reduce((sum, v) => sum + v, 0) / hfBins.length / 255;
+
+      for (let i = 0; i < pos.count; i++) {
+        const ox = orig.getX(i), oy = orig.getY(i), oz = orig.getZ(i);
+        const dir = new THREE.Vector3(ox, oy, oz).normalize();
+        const bin = Math.floor((i / pos.count) * freqData.length);
+        const amp = freqData[bin] / 255;
+        let displacement = 1 + amp * 0.5;
+        // Spikes from high frequencies
+        displacement += Math.pow(highAvg, 2) * 2;
+        pos.setXYZ(i, dir.x * displacement, dir.y * displacement, dir.z * displacement);
+      }
+      pos.needsUpdate = true;
+      geom.computeVertexNormals();
+    }
+
+    function colorPulse(freqData) {
+      const start = Math.floor(freqData.length * 0.3);
+      const end = Math.floor(freqData.length * 0.6);
+      const midBins = freqData.slice(start, end);
+      const avg = midBins.reduce((sum, v) => sum + v, 0) / midBins.length / 255;
+      const hue = (performance.now() * 0.0001 + avg * 0.5) % 1;
+      sphere.material.color.setHSL(hue, 1, 0.5);
+      sphere.material.emissive.setHSL(hue, 1, avg * 0.5);
+      sphere.material.needsUpdate = true;
+    }
+  </script>
+</body>
+</html>
